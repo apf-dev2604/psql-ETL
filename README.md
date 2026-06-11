@@ -1,4 +1,4 @@
-# Migration Engine Multi-Brand - Lindy Low-Memory Build
+# Migration Engine Multi-Brand 
 
 This package was rebuilt from the four current working scripts supplied in the chat. The uploaded scripts are included unchanged for audit under `scripts/`:
 
