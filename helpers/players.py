@@ -134,7 +134,7 @@ def lookup_player_id_by_username(conn, config, username: Any) -> Optional[uuid.U
     return row[0] if row else None
 
 
-def upsert_player(conn, config, mapped: Any, dry_run: bool) -> uuid.UUID:
+def upsert_player(conn, config, mapped: Any, dry_run: bool, return_status: bool = False):
     mapped = _as_mapping(mapped)
     username = clean_username(mapped.get("username"))
     if not username:
@@ -147,7 +147,9 @@ def upsert_player(conn, config, mapped: Any, dry_run: bool) -> uuid.UUID:
                 (username_key(username),),
             )
             row = cur.fetchone()
-            return row[0] if row else uuid.uuid4()
+            player_id = row[0] if row else uuid.uuid4()
+            status = "duplicate" if row else "insertable"
+            return (player_id, status) if return_status else player_id
 
     outlet_code = mapped.get("outlet_code")
     ensure_outlet(conn, config, outlet_code, dry_run=dry_run)
@@ -187,7 +189,7 @@ def upsert_player(conn, config, mapped: Any, dry_run: bool) -> uuid.UUID:
         "incomeSource"=EXCLUDED."incomeSource",
         "industry"=EXCLUDED."industry",
         "updatedAt"=now()
-    RETURNING id
+    RETURNING id, (xmax = 0) AS inserted
     """
     params = (
         username,
@@ -219,4 +221,8 @@ def upsert_player(conn, config, mapped: Any, dry_run: bool) -> uuid.UUID:
     )
     with conn.cursor() as cur:
         cur.execute(sql, params)
-        return cur.fetchone()[0]
+        row = cur.fetchone()
+        player_id = row[0]
+        inserted = bool(row[1]) if len(row) > 1 else True
+        status = "inserted" if inserted else "duplicate_updated"
+        return (player_id, status) if return_status else player_id

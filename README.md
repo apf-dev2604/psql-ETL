@@ -69,3 +69,34 @@ python3 main.py --brand inplay --dq-only --date-from 2026-05-26 --date-to 2026-0
 - InplayV1: JSONB source tables with `createddate`, `GameDate`, `transferDate`; registration-only player creation; game/wallet no ghost/shadow player creation.
 - Instaplay/88Play: member-driven source flow; registration/member row drives child game and wallet fetches; mapping follows the supplied 88Play/Instaplay script.
 - 1Play: flat RDBMS source tables; `LOGIN_NAME`/`PLAYER_ACCOUNT`/`PLAYER_NAME` based joining; game `TRANSACTION_ID` to externalId; wallet `TRANSACTION_ID` to referenceId.
+
+## Phase summary and CSV reporting
+
+This package writes CSV report files under `MIGRATION_REPORT_DIR` (default: `reports`) and log files under `MIGRATION_LOG_DIR` (default: `logs`).
+
+At run startup, the engine creates header-only CSV files immediately, including a run summary file:
+
+```text
+<brand>_runSummary_<date-window>-rundate_<timestamp>.csv
+```
+
+Each phase writes one lightweight summary row instead of accumulating row details in memory. The summary includes:
+
+- `sourceRows`
+- `mappedRows`
+- `insertedRows`
+- `duplicateRows`
+- `skippedRows`
+- `missingPlayerRows`
+- `missingUsernameRows`
+- `missingRequiredRows`
+- `mappingErrorRows`
+- `insertErrorRows`
+
+The same phase summary is also printed once per phase to the screen/log as:
+
+```text
+[PHASE SUMMARY][<brand> <phase>] ...
+```
+
+This is designed for 4GB EC2 hosts: it keeps only integer counters in memory and avoids full SQL/log spam inside every fetch loop.

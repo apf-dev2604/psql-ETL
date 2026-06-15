@@ -42,6 +42,7 @@ class ReportPaths:
     withdrawals: str
     reconciliation: str
     data_quality: str
+    summary: str
 
 
 def make_report_paths(brand_key: str, date_from, date_to, timestamp: Optional[str] = None) -> ReportPaths:
@@ -58,14 +59,17 @@ def make_report_paths(brand_key: str, date_from, date_to, timestamp: Optional[st
         dq_suffix = f"{part(date_from, '00000000')}-{part(date_to, '99999999')}-rundate_{timestamp}"
 
     base = brand_key.lower()
+    report_dir = os.getenv("MIGRATION_REPORT_DIR", "reports")
+    log_dir = os.getenv("MIGRATION_LOG_DIR", "logs")
     return ReportPaths(
-        log=f"logs/{base}_trace_{suffix}.log",
-        players=f"reports/{base}_players_{suffix}.csv",
-        game=f"reports/{base}_gameTransaction_{suffix}.csv",
-        deposits=f"reports/{base}_deposits_{suffix}.csv",
-        withdrawals=f"reports/{base}_withdrawals_{suffix}.csv",
-        reconciliation=f"reports/{base}_reconciliation_{suffix}.csv",
-        data_quality=f"reports/dataQuality_{base}_{dq_suffix}.csv",
+        log=os.path.join(log_dir, f"{base}_trace_{suffix}.log"),
+        players=os.path.join(report_dir, f"{base}_players_{suffix}.csv"),
+        game=os.path.join(report_dir, f"{base}_gameTransaction_{suffix}.csv"),
+        deposits=os.path.join(report_dir, f"{base}_deposits_{suffix}.csv"),
+        withdrawals=os.path.join(report_dir, f"{base}_withdrawals_{suffix}.csv"),
+        reconciliation=os.path.join(report_dir, f"{base}_reconciliation_{suffix}.csv"),
+        data_quality=os.path.join(report_dir, f"dataQuality_{base}_{dq_suffix}.csv"),
+        summary=os.path.join(report_dir, f"{base}_runSummary_{suffix}.csv"),
     )
 
 
@@ -115,3 +119,54 @@ def write_reconciliation(path: str, **kwargs: Any) -> None:
     row = {name: short_text(kwargs.get(name), 500) for name in RECON_FIELDS}
     row["timestamp"] = datetime.now(timezone.utc).isoformat()
     write_csv_row(path, RECON_FIELDS, row)
+
+
+DQ_FIELDS = ["phase", "mismatchColCount", "date-from", "date-to", "columnList"]
+
+
+def ensure_csv_header(path: str, fieldnames: List[str]) -> None:
+    """Create a CSV file with only headers when it does not yet exist."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if os.path.isfile(path):
+        return
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+
+
+def initialize_report_files(paths: ReportPaths) -> None:
+    """Create all standard run CSV files at startup, even when there are zero report rows."""
+    ensure_csv_header(paths.players, PHASE_FIELDS)
+    ensure_csv_header(paths.game, PHASE_FIELDS)
+    ensure_csv_header(paths.deposits, PHASE_FIELDS)
+    ensure_csv_header(paths.withdrawals, PHASE_FIELDS)
+    ensure_csv_header(paths.reconciliation, RECON_FIELDS)
+    ensure_csv_header(paths.data_quality, DQ_FIELDS)
+    ensure_csv_header(paths.summary, SUMMARY_FIELDS)
+
+
+SUMMARY_FIELDS = [
+    "timestamp",
+    "brand",
+    "phase",
+    "sourceRows",
+    "mappedRows",
+    "insertedRows",
+    "duplicateRows",
+    "skippedRows",
+    "missingPlayerRows",
+    "missingUsernameRows",
+    "missingRequiredRows",
+    "mappingErrorRows",
+    "insertErrorRows",
+    "dryRun",
+    "dateFrom",
+    "dateTo",
+    "notes",
+]
+
+
+def write_summary_report(path: str, **kwargs: Any) -> None:
+    row = {name: short_text(kwargs.get(name), 500) for name in SUMMARY_FIELDS}
+    row["timestamp"] = datetime.now(timezone.utc).isoformat()
+    write_csv_row(path, SUMMARY_FIELDS, row)

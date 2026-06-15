@@ -28,7 +28,7 @@ def ensure_wallet_dedupe_index(conn, config, dry_run: bool) -> None:
         cur.execute(sql, (config.WALLET_PLATFORM,))
 
 
-def insert_wallet_transactions(conn, config, rows: List[Dict[str, Any]], dry_run: bool, report_path: Optional[str] = None) -> Tuple[int, int]:
+def insert_wallet_transactions(conn, config, rows: List[Dict[str, Any]], dry_run: bool, report_path: Optional[str] = None) -> Tuple[int, int, int]:
     values: List[Tuple[Any, ...]] = []
     skipped = 0
     seen = set()
@@ -55,9 +55,9 @@ def insert_wallet_transactions(conn, config, rows: List[Dict[str, Any]], dry_run
             created, confirmed_dt, cancelled_dt, failed_dt, row.get("reference_id"),
         ))
     if dry_run:
-        return (len(values), skipped)
+        return (0, 0, skipped)
     if not values:
-        return (0, skipped)
+        return (0, 0, skipped)
     sql = f"""
     INSERT INTO {table_ref(config.TARGET_SCHEMA, config.WALLET_TRANSACTION_TABLE)} (
         "transactionType", "platform", "playerId", "paymentGateway", "domain", "amount", "status",
@@ -69,4 +69,6 @@ def insert_wallet_transactions(conn, config, rows: List[Dict[str, Any]], dry_run
     """
     with conn.cursor() as cur:
         execute_values(cur, sql, values, page_size=config.INSERT_PAGE_SIZE)
-    return (len(values), skipped)
+        inserted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(values)
+    duplicates = max(0, len(values) - int(inserted or 0))
+    return (int(inserted or 0), duplicates, skipped)

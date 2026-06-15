@@ -107,7 +107,7 @@ def get_or_create_game_list(conn, config, game_name: str, provider_id: uuid.UUID
     return gid
 
 
-def insert_game_transactions(conn, config, rows: List[Dict[str, Any]], dry_run: bool, report_path: Optional[str] = None) -> Tuple[int, int]:
+def insert_game_transactions(conn, config, rows: List[Dict[str, Any]], dry_run: bool, report_path: Optional[str] = None) -> Tuple[int, int, int]:
     values: List[Tuple[Any, ...]] = []
     skipped = 0
     provider_cache: Dict[str, uuid.UUID] = {}
@@ -138,9 +138,9 @@ def insert_game_transactions(conn, config, rows: List[Dict[str, Any]], dry_run: 
         ))
 
     if dry_run:
-        return (len(values), skipped)
+        return (0, 0, skipped)
     if not values:
-        return (0, skipped)
+        return (0, 0, skipped)
 
     sql = f"""
     INSERT INTO {table_ref(config.TARGET_SCHEMA, config.GAME_TRANSACTION_TABLE)} (
@@ -154,4 +154,6 @@ def insert_game_transactions(conn, config, rows: List[Dict[str, Any]], dry_run: 
     """
     with conn.cursor() as cur:
         execute_values(cur, sql, values, page_size=config.INSERT_PAGE_SIZE)
-    return (len(values), skipped)
+        inserted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(values)
+    duplicates = max(0, len(values) - int(inserted or 0))
+    return (int(inserted or 0), duplicates, skipped)

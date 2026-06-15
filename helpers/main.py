@@ -8,7 +8,7 @@ from .models import BrandConfig, NormalizedGameTransaction, NormalizedPlayer, No
 from .validators import validate_adapter, validate_brand_config
 from .db import connect
 from .players import build_player_map, lookup_player_id_by_username, upsert_player, username_key
-from .reports import configure_logging, make_report_paths, trace
+from .reports import configure_logging, make_report_paths, trace, initialize_report_files, write_summary_report
 from .source_fetch import fetch_json_batch, format_checkpoint, get_checkpoint, parse_checkpoint, set_checkpoint
 from .game_transactions import insert_game_transactions
 from .wallet_transactions import ensure_wallet_dedupe_index, insert_wallet_transactions
@@ -21,6 +21,68 @@ PUBLIC_BRANDS = {
     "instaplay": "instaplay",
     "1play": "oneplay",
 }
+
+
+def new_stats(phase: str) -> Dict[str, int]:
+    return {
+        "phase": phase,
+        "sourceRows": 0,
+        "mappedRows": 0,
+        "insertedRows": 0,
+        "duplicateRows": 0,
+        "skippedRows": 0,
+        "missingPlayerRows": 0,
+        "missingUsernameRows": 0,
+        "missingRequiredRows": 0,
+        "mappingErrorRows": 0,
+        "insertErrorRows": 0,
+        "batches": 0,
+    }
+
+
+def add_insert_stats(stats: Dict[str, int], result) -> None:
+    """Accept insert helper result as (inserted, duplicates, skipped)."""
+    try:
+        inserted, duplicates, skipped = result
+    except Exception:
+        inserted, duplicates, skipped = (0, 0, 0)
+    stats["insertedRows"] += int(inserted or 0)
+    stats["duplicateRows"] += int(duplicates or 0)
+    stats["skippedRows"] += int(skipped or 0)
+    stats["missingRequiredRows"] += int(skipped or 0)
+
+
+def emit_phase_summary(ctx: MigrationContext, args, stats: Dict[str, int], notes: str = "") -> None:
+    msg = (
+        f"[PHASE SUMMARY][{ctx.config.BRAND_KEY} {stats['phase']}] "
+        f"sourceRows={stats['sourceRows']} mappedRows={stats['mappedRows']} "
+        f"insertedRows={stats['insertedRows']} duplicateRows={stats['duplicateRows']} "
+        f"skippedRows={stats['skippedRows']} missingPlayerRows={stats['missingPlayerRows']} "
+        f"missingUsernameRows={stats['missingUsernameRows']} missingRequiredRows={stats['missingRequiredRows']} "
+        f"mappingErrorRows={stats['mappingErrorRows']} insertErrorRows={stats['insertErrorRows']} "
+        f"batches={stats['batches']}"
+    )
+    trace(msg)
+    write_summary_report(
+        ctx.paths.summary,
+        brand=ctx.config.BRAND_KEY,
+        phase=stats["phase"],
+        sourceRows=stats["sourceRows"],
+        mappedRows=stats["mappedRows"],
+        insertedRows=stats["insertedRows"],
+        duplicateRows=stats["duplicateRows"],
+        skippedRows=stats["skippedRows"],
+        missingPlayerRows=stats["missingPlayerRows"],
+        missingUsernameRows=stats["missingUsernameRows"],
+        missingRequiredRows=stats["missingRequiredRows"],
+        mappingErrorRows=stats["mappingErrorRows"],
+        insertErrorRows=stats["insertErrorRows"],
+        dryRun=args.dry_run,
+        dateFrom=ctx.from_dt,
+        dateTo=ctx.until_dt,
+        notes=notes,
+    )
+
 
 def load_brand(brand_key: str):
     public_key = str(brand_key).strip().lower()
@@ -81,18 +143,36 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
     detail_map = fetch_detail_map(adapter, src_conn, from_dt, until_dt)
     total = 0
 
+    stats = new_stats("players")
     phase = "players"
     after_dt, after_id = (None, None) if args.date_from or args.date_to else parse_checkpoint(get_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key(phase)) if args.resume else None)
     while True:
         rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES["players"], source_date_expr(adapter, "players"), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} players")
         if not rows:
             break
+        stats["batches"] += 1
+        stats["sourceRows"] += len(rows)
         for row in rows:
-            if hasattr(adapter, "ensure_outlet_from_player_row"):
-                adapter.ensure_outlet_from_player_row(tgt_conn, row, args.dry_run)
-            mapped = adapter.map_player(row, detail_map)
-            if mapped:
-                upsert_player(tgt_conn, config, NormalizedPlayer.from_mapping(mapped), args.dry_run)
+            try:
+                if hasattr(adapter, "ensure_outlet_from_player_row"):
+                    adapter.ensure_outlet_from_player_row(tgt_conn, row, args.dry_run)
+                mapped = adapter.map_player(row, detail_map)
+                if not mapped:
+                    stats["skippedRows"] += 1
+                    stats["missingUsernameRows"] += 1
+                    continue
+                stats["mappedRows"] += 1
+                _, status = upsert_player(tgt_conn, config, NormalizedPlayer.from_mapping(mapped), args.dry_run, return_status=True)
+                if status in ("inserted", "insertable"):
+                    stats["insertedRows"] += 1
+                else:
+                    stats["duplicateRows"] += 1
+            except Exception as exc:
+                stats["skippedRows"] += 1
+                stats["insertErrorRows"] += 1
+                trace(f"[PLAYER ERROR][{config.BRAND_KEY}] sourceId={row.get('id')} error={exc}")
+                if not args.dry_run:
+                    tgt_conn.rollback()
         last = rows[-1]
         last_data = adapter.as_dict(last.get("data"))
         after_id = str(last["id"])
@@ -101,25 +181,51 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
         total += len(rows)
         if not args.dry_run:
             tgt_conn.commit()
+    emit_phase_summary(ctx, args, stats)
 
     player_map = build_player_map(tgt_conn, config)
 
+    stats = new_stats("game_transactions")
     phase = "game_transactions"
     after_dt, after_id = (None, None) if args.date_from or args.date_to else parse_checkpoint(get_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key(phase)) if args.resume else None)
     while True:
         rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES["game_transactions"], source_date_expr(adapter, "game_transactions"), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} game")
         if not rows:
             break
-        mapped_rows: List[Dict[str, Any]] = []
+        stats["batches"] += 1
+        stats["sourceRows"] += len(rows)
+        mapped_rows: List[Any] = []
         for row in rows:
-            mapped = adapter.map_game_transaction(row)
-            if not mapped:
-                continue
-            player_id = resolve_player_id(tgt_conn, config, player_map, mapped.get("username") or "")
-            if player_id:
-                mapped["player_id"] = player_id
-                mapped_rows.append(NormalizedGameTransaction.from_mapping(mapped))
-        insert_game_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.game)
+            try:
+                mapped = adapter.map_game_transaction(row)
+                if not mapped:
+                    stats["skippedRows"] += 1
+                    stats["mappingErrorRows"] += 1
+                    continue
+                username = mapped.get("username") or ""
+                if not username:
+                    stats["skippedRows"] += 1
+                    stats["missingUsernameRows"] += 1
+                    continue
+                player_id = resolve_player_id(tgt_conn, config, player_map, username)
+                if player_id:
+                    mapped["player_id"] = player_id
+                    mapped_rows.append(NormalizedGameTransaction.from_mapping(mapped))
+                    stats["mappedRows"] += 1
+                else:
+                    stats["skippedRows"] += 1
+                    stats["missingPlayerRows"] += 1
+            except Exception as exc:
+                stats["skippedRows"] += 1
+                stats["mappingErrorRows"] += 1
+                trace(f"[GAME MAP ERROR][{config.BRAND_KEY}] sourceId={row.get('id')} error={exc}")
+        try:
+            add_insert_stats(stats, insert_game_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.game))
+        except Exception as exc:
+            stats["insertErrorRows"] += len(mapped_rows) or 1
+            trace(f"[GAME INSERT ERROR][{config.BRAND_KEY}] rows={len(mapped_rows)} error={exc}")
+            if not args.dry_run:
+                tgt_conn.rollback()
         last = rows[-1]
         last_data = adapter.as_dict(last.get("data"))
         after_id = str(last["id"])
@@ -128,24 +234,50 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
         total += len(rows)
         if not args.dry_run:
             tgt_conn.commit()
+    emit_phase_summary(ctx, args, stats)
 
     for kind, source_key, report_path in (("deposit", "deposits", paths.deposits), ("withdrawal", "withdrawals", paths.withdrawals)):
+        stats = new_stats(source_key)
         phase = source_key
         after_dt, after_id = (None, None) if args.date_from or args.date_to else parse_checkpoint(get_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key(phase)) if args.resume else None)
         while True:
             rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES[source_key], source_date_expr(adapter, source_key), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} {kind}")
             if not rows:
                 break
+            stats["batches"] += 1
+            stats["sourceRows"] += len(rows)
             mapped_rows = []
             for row in rows:
-                mapped = adapter.map_wallet(row, kind)
-                if not mapped:
-                    continue
-                player_id = resolve_player_id(tgt_conn, config, player_map, mapped.get("username") or "")
-                if player_id:
-                    mapped["player_id"] = player_id
-                    mapped_rows.append(NormalizedWalletTransaction.from_mapping(mapped))
-            insert_wallet_transactions(tgt_conn, config, mapped_rows, args.dry_run, report_path)
+                try:
+                    mapped = adapter.map_wallet(row, kind)
+                    if not mapped:
+                        stats["skippedRows"] += 1
+                        stats["mappingErrorRows"] += 1
+                        continue
+                    username = mapped.get("username") or ""
+                    if not username:
+                        stats["skippedRows"] += 1
+                        stats["missingUsernameRows"] += 1
+                        continue
+                    player_id = resolve_player_id(tgt_conn, config, player_map, username)
+                    if player_id:
+                        mapped["player_id"] = player_id
+                        mapped_rows.append(NormalizedWalletTransaction.from_mapping(mapped))
+                        stats["mappedRows"] += 1
+                    else:
+                        stats["skippedRows"] += 1
+                        stats["missingPlayerRows"] += 1
+                except Exception as exc:
+                    stats["skippedRows"] += 1
+                    stats["mappingErrorRows"] += 1
+                    trace(f"[WALLET MAP ERROR][{config.BRAND_KEY} {kind}] sourceId={row.get('id')} error={exc}")
+            try:
+                add_insert_stats(stats, insert_wallet_transactions(tgt_conn, config, mapped_rows, args.dry_run, report_path))
+            except Exception as exc:
+                stats["insertErrorRows"] += len(mapped_rows) or 1
+                trace(f"[WALLET INSERT ERROR][{config.BRAND_KEY} {kind}] rows={len(mapped_rows)} error={exc}")
+                if not args.dry_run:
+                    tgt_conn.rollback()
             last = rows[-1]
             last_data = adapter.as_dict(last.get("data"))
             after_id = str(last["id"])
@@ -154,6 +286,7 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
             total += len(rows)
             if not args.dry_run:
                 tgt_conn.commit()
+        emit_phase_summary(ctx, args, stats)
     return total
 
 
@@ -165,6 +298,7 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
     detail_map = fetch_detail_map(adapter, src_conn, ctx.from_dt, ctx.until_dt)
     total = 0
 
+    stats = new_stats("players")
     phase = "players"
     after_id = args.start_after_id or None
     if after_id is None and args.resume:
@@ -174,20 +308,39 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
         rows = adapter.fetch_player_rows(src_conn, int(after_id or 0), args.batch_size, ctx.from_dt, ctx.until_dt)
         if not rows:
             break
+        stats["batches"] += 1
+        stats["sourceRows"] += len(rows)
         for row in rows:
-            if hasattr(adapter, "ensure_outlet_from_player_row"):
-                adapter.ensure_outlet_from_player_row(tgt_conn, row, args.dry_run)
-            mapped = adapter.map_player(row, detail_map)
-            if mapped:
-                upsert_player(tgt_conn, config, NormalizedPlayer.from_mapping(mapped), args.dry_run)
+            try:
+                if hasattr(adapter, "ensure_outlet_from_player_row"):
+                    adapter.ensure_outlet_from_player_row(tgt_conn, row, args.dry_run)
+                mapped = adapter.map_player(row, detail_map)
+                if not mapped:
+                    stats["skippedRows"] += 1
+                    stats["missingUsernameRows"] += 1
+                    continue
+                stats["mappedRows"] += 1
+                _, status = upsert_player(tgt_conn, config, NormalizedPlayer.from_mapping(mapped), args.dry_run, return_status=True)
+                if status in ("inserted", "insertable"):
+                    stats["insertedRows"] += 1
+                else:
+                    stats["duplicateRows"] += 1
+            except Exception as exc:
+                stats["skippedRows"] += 1
+                stats["insertErrorRows"] += 1
+                trace(f"[PLAYER ERROR][{config.BRAND_KEY}] sourceId={row.get('IDX') or row.get('id')} error={exc}")
+                if not args.dry_run:
+                    tgt_conn.rollback()
         after_id = str(rows[-1].get("IDX") or rows[-1].get("id") or after_id or 0)
         set_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key(phase), after_id, args.dry_run)
         total += len(rows)
         if not args.dry_run:
             tgt_conn.commit()
+    emit_phase_summary(ctx, args, stats)
 
     player_map = build_player_map(tgt_conn, config)
 
+    stats = new_stats("game_transactions")
     phase = "game_transactions"
     after_id = args.start_after_id or None
     if after_id is None and args.resume:
@@ -197,22 +350,48 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
         rows = adapter.fetch_game_rows(src_conn, int(after_id or 0), args.batch_size, ctx.from_dt, ctx.until_dt)
         if not rows:
             break
+        stats["batches"] += 1
+        stats["sourceRows"] += len(rows)
         mapped_rows = []
         for row in rows:
-            mapped = adapter.map_game_transaction(row)
-            if not mapped:
-                continue
-            player_id = resolve_player_id(tgt_conn, config, player_map, mapped.get("username") or "")
-            if player_id:
-                mapped["player_id"] = player_id
-                mapped_rows.append(NormalizedGameTransaction.from_mapping(mapped))
-        insert_game_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.game)
+            try:
+                mapped = adapter.map_game_transaction(row)
+                if not mapped:
+                    stats["skippedRows"] += 1
+                    stats["mappingErrorRows"] += 1
+                    continue
+                username = mapped.get("username") or ""
+                if not username:
+                    stats["skippedRows"] += 1
+                    stats["missingUsernameRows"] += 1
+                    continue
+                player_id = resolve_player_id(tgt_conn, config, player_map, username)
+                if player_id:
+                    mapped["player_id"] = player_id
+                    mapped_rows.append(NormalizedGameTransaction.from_mapping(mapped))
+                    stats["mappedRows"] += 1
+                else:
+                    stats["skippedRows"] += 1
+                    stats["missingPlayerRows"] += 1
+            except Exception as exc:
+                stats["skippedRows"] += 1
+                stats["mappingErrorRows"] += 1
+                trace(f"[GAME MAP ERROR][{config.BRAND_KEY}] sourceId={row.get('IDX') or row.get('id')} error={exc}")
+        try:
+            add_insert_stats(stats, insert_game_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.game))
+        except Exception as exc:
+            stats["insertErrorRows"] += len(mapped_rows) or 1
+            trace(f"[GAME INSERT ERROR][{config.BRAND_KEY}] rows={len(mapped_rows)} error={exc}")
+            if not args.dry_run:
+                tgt_conn.rollback()
         after_id = str(rows[-1].get("IDX") or rows[-1].get("id") or after_id or 0)
         set_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key(phase), after_id, args.dry_run)
         total += len(rows)
         if not args.dry_run:
             tgt_conn.commit()
+    emit_phase_summary(ctx, args, stats)
 
+    stats = new_stats("wallet_transactions")
     phase = "wallet_transactions"
     after_id = args.start_after_id or None
     if after_id is None and args.resume:
@@ -222,21 +401,46 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
         rows = adapter.fetch_wallet_rows(src_conn, int(after_id or 0), args.batch_size, ctx.from_dt, ctx.until_dt)
         if not rows:
             break
+        stats["batches"] += 1
+        stats["sourceRows"] += len(rows)
         mapped_rows = []
         for row in rows:
-            mapped = adapter.map_wallet(row, "wallet")
-            if not mapped:
-                continue
-            player_id = resolve_player_id(tgt_conn, config, player_map, mapped.get("username") or "")
-            if player_id:
-                mapped["player_id"] = player_id
-                mapped_rows.append(NormalizedWalletTransaction.from_mapping(mapped))
-        insert_wallet_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.deposits)
+            try:
+                mapped = adapter.map_wallet(row, "wallet")
+                if not mapped:
+                    stats["skippedRows"] += 1
+                    stats["mappingErrorRows"] += 1
+                    continue
+                username = mapped.get("username") or ""
+                if not username:
+                    stats["skippedRows"] += 1
+                    stats["missingUsernameRows"] += 1
+                    continue
+                player_id = resolve_player_id(tgt_conn, config, player_map, username)
+                if player_id:
+                    mapped["player_id"] = player_id
+                    mapped_rows.append(NormalizedWalletTransaction.from_mapping(mapped))
+                    stats["mappedRows"] += 1
+                else:
+                    stats["skippedRows"] += 1
+                    stats["missingPlayerRows"] += 1
+            except Exception as exc:
+                stats["skippedRows"] += 1
+                stats["mappingErrorRows"] += 1
+                trace(f"[WALLET MAP ERROR][{config.BRAND_KEY}] sourceId={row.get('IDX') or row.get('id')} error={exc}")
+        try:
+            add_insert_stats(stats, insert_wallet_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.deposits))
+        except Exception as exc:
+            stats["insertErrorRows"] += len(mapped_rows) or 1
+            trace(f"[WALLET INSERT ERROR][{config.BRAND_KEY}] rows={len(mapped_rows)} error={exc}")
+            if not args.dry_run:
+                tgt_conn.rollback()
         after_id = str(rows[-1].get("IDX") or rows[-1].get("id") or after_id or 0)
         set_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key(phase), after_id, args.dry_run)
         total += len(rows)
         if not args.dry_run:
             tgt_conn.commit()
+    emit_phase_summary(ctx, args, stats)
     return total
 
 
@@ -250,46 +454,75 @@ def process_member_driven_brand(src_conn, tgt_conn, ctx: MigrationContext, args)
     detail_cache = {}
     player_map = build_player_map(tgt_conn, config)
     processed = 0
+    player_stats = new_stats("players")
+    game_stats = new_stats("game_transactions")
+    wallet_stats = new_stats("wallet_transactions")
     after_dt, after_id = (None, None) if args.date_from or args.date_to else parse_checkpoint(get_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key("players")) if args.resume else None)
 
     while True:
         rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES["players"], source_date_expr(adapter, "players"), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} member batch")
         if not rows:
             break
+        player_stats["batches"] += 1
+        player_stats["sourceRows"] += len(rows)
         for row in rows:
-            player = adapter.map_player(row, detail_cache, src_conn=src_conn)
-            if not player:
-                continue
-            player_model = NormalizedPlayer.from_mapping(player)
-            player_id = upsert_player(tgt_conn, config, player_model, args.dry_run)
-            player_map[username_key(player_model.username)] = player_id
-            member_id = player_model.external_id
-            username = player_model.username
+            try:
+                player = adapter.map_player(row, detail_cache, src_conn=src_conn)
+                if not player:
+                    player_stats["skippedRows"] += 1
+                    player_stats["missingUsernameRows"] += 1
+                    continue
+                player_model = NormalizedPlayer.from_mapping(player)
+                player_id, status = upsert_player(tgt_conn, config, player_model, args.dry_run, return_status=True)
+                player_stats["mappedRows"] += 1
+                if status in ("inserted", "insertable"):
+                    player_stats["insertedRows"] += 1
+                else:
+                    player_stats["duplicateRows"] += 1
+                player_map[username_key(player_model.username)] = player_id
+                member_id = player_model.external_id
+                username = player_model.username
 
-            game_rows = adapter.fetch_member_game_rows(src_conn, member_id, username, args.tx_limit, from_dt, until_dt)
-            mapped_games = []
-            for game_row in game_rows:
-                mapped = adapter.map_game_transaction(game_row)
-                if mapped:
-                    mapped["player_id"] = player_id
-                    mapped_games.append(NormalizedGameTransaction.from_mapping(mapped))
-            insert_game_transactions(tgt_conn, config, mapped_games, args.dry_run, paths.game)
-
-            wallet_rows = []
-            for kind in ("deposit", "withdrawal"):
-                rows_for_kind = adapter.fetch_member_wallet_rows(src_conn, kind, member_id, args.wallet_limit, from_dt, until_dt)
-                for wallet_row in rows_for_kind:
-                    mapped = adapter.map_wallet(wallet_row, kind)
+                game_rows = adapter.fetch_member_game_rows(src_conn, member_id, username, args.tx_limit, from_dt, until_dt)
+                game_stats["sourceRows"] += len(game_rows)
+                mapped_games = []
+                for game_row in game_rows:
+                    mapped = adapter.map_game_transaction(game_row)
                     if mapped:
                         mapped["player_id"] = player_id
-                        wallet_rows.append(NormalizedWalletTransaction.from_mapping(mapped))
-            insert_wallet_transactions(tgt_conn, config, wallet_rows, args.dry_run, paths.deposits)
-            processed += 1
-            if processed % args.commit_every == 0:
-                if args.dry_run:
+                        mapped_games.append(NormalizedGameTransaction.from_mapping(mapped))
+                        game_stats["mappedRows"] += 1
+                    else:
+                        game_stats["skippedRows"] += 1
+                        game_stats["mappingErrorRows"] += 1
+                add_insert_stats(game_stats, insert_game_transactions(tgt_conn, config, mapped_games, args.dry_run, paths.game))
+
+                wallet_rows = []
+                for kind in ("deposit", "withdrawal"):
+                    rows_for_kind = adapter.fetch_member_wallet_rows(src_conn, kind, member_id, args.wallet_limit, from_dt, until_dt)
+                    wallet_stats["sourceRows"] += len(rows_for_kind)
+                    for wallet_row in rows_for_kind:
+                        mapped = adapter.map_wallet(wallet_row, kind)
+                        if mapped:
+                            mapped["player_id"] = player_id
+                            wallet_rows.append(NormalizedWalletTransaction.from_mapping(mapped))
+                            wallet_stats["mappedRows"] += 1
+                        else:
+                            wallet_stats["skippedRows"] += 1
+                            wallet_stats["mappingErrorRows"] += 1
+                add_insert_stats(wallet_stats, insert_wallet_transactions(tgt_conn, config, wallet_rows, args.dry_run, paths.deposits))
+                processed += 1
+                if processed % args.commit_every == 0:
+                    if args.dry_run:
+                        tgt_conn.rollback()
+                    else:
+                        tgt_conn.commit()
+            except Exception as exc:
+                player_stats["skippedRows"] += 1
+                player_stats["insertErrorRows"] += 1
+                trace(f"[MEMBER LOOP ERROR][{config.BRAND_KEY}] sourceId={row.get('id')} error={exc}")
+                if not args.dry_run:
                     tgt_conn.rollback()
-                else:
-                    tgt_conn.commit()
         last = rows[-1]
         last_data = adapter.as_dict(last.get("data"))
         after_id = str(last["id"])
@@ -297,6 +530,9 @@ def process_member_driven_brand(src_conn, tgt_conn, ctx: MigrationContext, args)
         set_checkpoint(tgt_conn, config.TARGET_SCHEMA, config.CHECKPOINT_TABLE, config.checkpoint_key("players"), format_checkpoint(after_dt, after_id), args.dry_run)
         if not args.dry_run:
             tgt_conn.commit()
+    emit_phase_summary(ctx, args, player_stats)
+    emit_phase_summary(ctx, args, game_stats)
+    emit_phase_summary(ctx, args, wallet_stats)
     return processed
 
 
@@ -326,6 +562,7 @@ def main() -> None:
     adapter, config = load_brand(args.brand)
     paths = make_report_paths(config.BRAND_KEY, args.date_from, args.date_to)
     configure_logging(paths.log)
+    initialize_report_files(paths)
     from_dt, until_dt = business_window_bounds(args.date_from, args.date_to, config.BUSINESS_WINDOW_START_HOUR, config.BUSINESS_TZ)
     trace(f"[DATE WINDOW][{config.BUSINESS_TZ_NAME}] source_from_inclusive={from_dt} source_to_exclusive={until_dt}")
     trace(f"[RESOURCE MODE] batch_size={args.batch_size} commit_every={args.commit_every} insert_page_size={config.INSERT_PAGE_SIZE}")
@@ -351,7 +588,7 @@ def main() -> None:
         else:
             tgt.commit()
         trace(f"[RUN SUMMARY][{config.BRAND}] sourceProcessed={total} dryRun={args.dry_run} reconOnly={args.recon_only} dqOnly={args.dq_only}")
-        trace(f"reports: players={paths.players} game={paths.game} deposits={paths.deposits} withdrawals={paths.withdrawals} reconciliation={paths.reconciliation}")
+        trace(f"reports: summary={paths.summary} players={paths.players} game={paths.game} deposits={paths.deposits} withdrawals={paths.withdrawals} reconciliation={paths.reconciliation}")
     finally:
         try:
             src.close()
