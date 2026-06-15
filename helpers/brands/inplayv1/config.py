@@ -7,9 +7,9 @@ PLATFORM = "Online"
 WALLET_PLATFORM = "Inplay"
 DEFAULT_DOMAIN = "www.inplay.com.ph"
 
-SOURCE_DB_NAME = os.getenv("INPLAYV1_SOURCE_DB", "iestdl")
+SOURCE_DB_NAME = os.getenv("INPLAYV1_SOURCE_DB", os.getenv("SOURCE_DB", "iestdl"))
 TARGET_DB_NAME = os.getenv("TARGET_DB", "iestdbrds")
-SOURCE_SCHEMA = os.getenv("INPLAYV1_SOURCE_SCHEMA", "public")
+SOURCE_SCHEMA = os.getenv("INPLAYV1_SOURCE_SCHEMA", os.getenv("SOURCE_SCHEMA", "public"))
 TARGET_SCHEMA = os.getenv("TARGET_SCHEMA", "migration_repair")
 SOURCE_MODE = "table_batch"
 SOURCE_TABLES = {

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from psycopg2.extras import RealDictCursor
 
 from helpers.dates import parse_iso_dt
-from helpers.players import clean_username, safe_mobile_10, to_decimal_str
+from helpers.players import clean_username, normalize_outlet_code, safe_mobile_10, to_decimal_str
 from helpers.db import table_ref
 from . import config
 
@@ -151,7 +151,7 @@ class Adapter:
         return rows
 
     def ensure_outlet_from_player_row(self, tgt_conn, row: Dict[str, Any], dry_run: bool) -> None:
-        outlet_code = str(row.get("OUTLET_CODE") or "").strip()
+        outlet_code = normalize_outlet_code(row.get("OUTLET_CODE"))
         if not outlet_code or dry_run:
             return
         outlet_name = str(row.get("OUTLET_NAME") or outlet_code).strip()
@@ -213,7 +213,7 @@ class Adapter:
             "is_active": det_status == "ACTIVE" or reg_status == "ACTIVE",
             "last_login": last_login,
             "last_login_ip": last_ip,
-            "outlet_code": str(row.get("OUTLET_CODE") or "").strip() or None,
+            "outlet_code": normalize_outlet_code(row.get("OUTLET_CODE")),
             "address_street": "",
             "address_barangay": "",
             "address_city": "",

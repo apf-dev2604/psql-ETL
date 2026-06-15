@@ -7,9 +7,9 @@ PLATFORM = "Online"
 WALLET_PLATFORM = "1Play"
 DEFAULT_DOMAIN = "1Play"
 
-SOURCE_DB_NAME = os.getenv("ONEPLAY_SOURCE_DB", "iestdl")
+SOURCE_DB_NAME = os.getenv("ONEPLAY_SOURCE_DB", os.getenv("SOURCE_DB", "iestdl"))
 TARGET_DB_NAME = os.getenv("TARGET_DB", "iestdbrds")
-SOURCE_SCHEMA = os.getenv("ONEPLAY_SOURCE_SCHEMA", "public")
+SOURCE_SCHEMA = os.getenv("ONEPLAY_SOURCE_SCHEMA", os.getenv("SOURCE_SCHEMA", "public"))
 TARGET_SCHEMA = os.getenv("TARGET_SCHEMA", "migration_repair")
 SOURCE_MODE = "flat_table_batch"
 SOURCE_TABLES = {

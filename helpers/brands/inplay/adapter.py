@@ -8,6 +8,7 @@ from helpers.dates import parse_iso_dt
 from helpers.players import (
     as_dict,
     clean_username,
+    normalize_outlet_code,
     sanitize_email,
     safe_mobile_10,
     split_name,
@@ -80,7 +81,7 @@ class Adapter:
             "is_active": str(data.get("status") or "").upper() == "ACTIVE",
             "last_login": parse_iso_dt(data.get("dateTimeLastAndroidLogIn")) or parse_iso_dt(data.get("dateTimeLastActive")),
             "last_login_ip": data.get("ipAddress"),
-            "outlet_code": data.get("branchCode"),
+            "outlet_code": normalize_outlet_code(data.get("branchCode")),
             "address_street": config.DEFAULT_ADDRESS,
             "address_barangay": config.DEFAULT_ADDRESS,
             "address_city": config.DEFAULT_ADDRESS,

@@ -5,7 +5,7 @@ from psycopg2.extras import RealDictCursor
 
 from helpers.db import table_ref
 from helpers.dates import parse_iso_dt
-from helpers.players import as_dict, clean_username, sanitize_email, safe_mobile_10, split_name, to_decimal_str
+from helpers.players import as_dict, clean_username, sanitize_email, safe_mobile_10, split_name, to_decimal_str, normalize_outlet_code
 from . import config
 
 SOURCE_DATE_KEYS = {
@@ -73,7 +73,7 @@ class Adapter:
                     "address_province": data.get("permanent_address") or data.get("addressProvince") or config.DEFAULT_ADDRESS,
                     "wallet_balance": to_decimal_str(data.get("balance") or "0"),
                     "external_id": data.get("card_id") or data.get("cardId") or data.get("id") or data.get("externalId"),
-                    "outlet_code": data.get("outlet_id") or data.get("outletCode"),
+                    "outlet_code": normalize_outlet_code(data.get("outlet_id") or data.get("outletCode")),
                     "contact_number": safe_mobile_10(data.get("contact_number") or data.get("contactNumber"), config.DEFAULT_MOBILE),
                     "birthdate": data.get("birthdate") or data.get("birthDay") or data.get("dateOfBirth") or data.get("birthDate"),
                     "income_source": data.get("incomeSource") or data.get("income_source") or "N/A",
@@ -116,7 +116,7 @@ class Adapter:
             "is_active": is_active,
             "last_login": None,
             "last_login_ip": None,
-            "outlet_code": data.get("outlet_id") or data.get("outletCode") or detail.get("outlet_code"),
+            "outlet_code": normalize_outlet_code(data.get("outlet_id") or data.get("outletCode")) or detail.get("outlet_code"),
             "address_street": data.get("current_address") or data.get("addressStreet") or config.DEFAULT_ADDRESS,
             "address_barangay": config.DEFAULT_ADDRESS,
             "address_city": config.DEFAULT_ADDRESS,

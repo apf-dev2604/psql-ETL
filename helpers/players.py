@@ -83,8 +83,19 @@ def to_decimal_str(value: Any) -> str:
     return text if text else "0"
 
 
+
+
+def normalize_outlet_code(value: Any) -> Optional[str]:
+    """Normalize outletCode for target FK consistency.
+
+    Outlet codes in target outletList are stored/validated in uppercase.
+    Keep this as a technical normalization only; it does not change brand mapping.
+    """
+    text = str(value or "").strip()
+    return text.upper() if text else None
+
 def ensure_outlet(conn, config, outlet_code: Optional[str], dry_run: bool) -> None:
-    code = str(outlet_code or "").strip()
+    code = normalize_outlet_code(outlet_code)
     if not code or dry_run:
         return
     sql = f"""
@@ -151,7 +162,7 @@ def upsert_player(conn, config, mapped: Any, dry_run: bool, return_status: bool 
             status = "duplicate" if row else "insertable"
             return (player_id, status) if return_status else player_id
 
-    outlet_code = mapped.get("outlet_code")
+    outlet_code = normalize_outlet_code(mapped.get("outlet_code"))
     ensure_outlet(conn, config, outlet_code, dry_run=dry_run)
 
     sql = f"""

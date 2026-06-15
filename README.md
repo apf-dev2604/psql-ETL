@@ -100,3 +100,25 @@ The same phase summary is also printed once per phase to the screen/log as:
 ```
 
 This is designed for 4GB EC2 hosts: it keeps only integer counters in memory and avoids full SQL/log spam inside every fetch loop.
+
+## Source and Target Routing
+
+This package is configured for the consolidated migration layout:
+
+- Source database: `iestdl` by default, override with `SOURCE_DB` or `<BRAND>_SOURCE_DB`.
+- Source schema: `public` by default, override with `SOURCE_SCHEMA` or `<BRAND>_SOURCE_SCHEMA`.
+- Target database: `iestdbrds` by default, override with `TARGET_DB`.
+- Target schema: `migration_repair` by default, override with `TARGET_SCHEMA`.
+- Target consolidated tables use the `_final` tables, including `playerDetails_final`, `gameTransaction_final`, and `walletTransaction_final`.
+
+Recommended `.env` values:
+
+```bash
+export SOURCE_DB="iestdl"
+export SOURCE_SCHEMA="public"
+export TARGET_DB="iestdbrds"
+export TARGET_SCHEMA="migration_repair"
+```
+
+The runtime player lookup/insert uses `migration_repair."playerDetails_final"`. If PostgreSQL reports that `playerId` is not present in table `playerDetails`, inspect the target foreign-key constraints because the database constraint may still point at an older non-final table.
+

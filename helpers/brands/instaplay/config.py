@@ -7,9 +7,9 @@ PLATFORM = "Online"
 WALLET_PLATFORM = "Instaplay"
 DEFAULT_DOMAIN = "instaplay.com.ph"
 
-SOURCE_DB_NAME = os.getenv("INSTAPLAY_SOURCE_DB", "iestdl")
+SOURCE_DB_NAME = os.getenv("INSTAPLAY_SOURCE_DB", os.getenv("SOURCE_DB", "iestdl"))
 TARGET_DB_NAME = os.getenv("TARGET_DB", "iestdbrds")
-SOURCE_SCHEMA = os.getenv("INSTAPLAY_SOURCE_SCHEMA", "public")
+SOURCE_SCHEMA = os.getenv("INSTAPLAY_SOURCE_SCHEMA", os.getenv("SOURCE_SCHEMA", "public"))
 TARGET_SCHEMA = os.getenv("TARGET_SCHEMA", "migration_repair")
 
 SOURCE_MODE = "member_driven"
