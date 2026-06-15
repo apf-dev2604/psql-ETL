@@ -74,17 +74,45 @@ def print_source_query(cur, label: str, query: str, params: Iterable[Any]) -> No
 
 
 def trace_source_result(label: str, table: str, rows: int, limit: int) -> None:
+    """Emit compact source-fetch progress without counting the terminal empty fetch as a data batch.
+
+    A cursor loop must issue one final SELECT that returns 0 rows to know the phase is complete.
+    That final empty SELECT is a fetch attempt, not a data batch, so it is reported as COMPLETE and
+    not included in the displayed batch count.
+    """
     if not _env_bool("MIGRATION_LOG_SOURCE_RESULTS", True):
         return
     every = max(1, _env_int("MIGRATION_SOURCE_RESULT_EVERY", 20))
     key = label or table
-    stats = _SOURCE_STATS.setdefault(key, {"batches": 0, "rows": 0})
-    stats["batches"] += 1
+    stats = _SOURCE_STATS.setdefault(key, {"data_batches": 0, "rows": 0, "fetch_attempts": 0, "completed": 0})
+    stats["fetch_attempts"] += 1
+
+    if rows <= 0:
+        if not stats.get("completed"):
+            stats["completed"] = 1
+            trace(
+                f"[SOURCE FETCH COMPLETE][{key}] data_batches={stats['data_batches']} "
+                f"total_rows={stats['rows']} final_rows=0 limit={limit} "
+                f"fetch_attempts={stats['fetch_attempts']}"
+            )
+        return
+
+    stats["data_batches"] += 1
     stats["rows"] += rows
-    if stats["batches"] == 1 or stats["batches"] % every == 0 or rows < limit:
+    data_batches = stats["data_batches"]
+
+    if data_batches == 1 or data_batches % every == 0:
         trace(
-            f"[SOURCE FETCH][{key}] batches={stats['batches']} "
+            f"[SOURCE FETCH][{key}] data_batches={data_batches} "
             f"total_rows={stats['rows']} last_rows={rows} limit={limit}"
+        )
+
+    if rows < limit and not stats.get("completed"):
+        stats["completed"] = 1
+        trace(
+            f"[SOURCE FETCH COMPLETE][{key}] data_batches={data_batches} "
+            f"total_rows={stats['rows']} final_rows={rows} limit={limit} "
+            f"fetch_attempts={stats['fetch_attempts']}"
         )
 
 

@@ -28,15 +28,17 @@ def new_stats(phase: str) -> Dict[str, int]:
         "phase": phase,
         "sourceRows": 0,
         "mappedRows": 0,
+        "insertAttemptRows": 0,
         "insertedRows": 0,
-        "duplicateRows": 0,
+        "updatedRows": 0,
+        "duplicateSkippedRows": 0,
         "skippedRows": 0,
         "missingPlayerRows": 0,
         "missingUsernameRows": 0,
         "missingRequiredRows": 0,
         "mappingErrorRows": 0,
         "insertErrorRows": 0,
-        "batches": 0,
+        "dataBatches": 0,
     }
 
 
@@ -46,21 +48,26 @@ def add_insert_stats(stats: Dict[str, int], result) -> None:
         inserted, duplicates, skipped = result
     except Exception:
         inserted, duplicates, skipped = (0, 0, 0)
-    stats["insertedRows"] += int(inserted or 0)
-    stats["duplicateRows"] += int(duplicates or 0)
-    stats["skippedRows"] += int(skipped or 0)
-    stats["missingRequiredRows"] += int(skipped or 0)
+    inserted = int(inserted or 0)
+    duplicates = int(duplicates or 0)
+    skipped = int(skipped or 0)
+    stats["insertAttemptRows"] += inserted + duplicates
+    stats["insertedRows"] += inserted
+    stats["duplicateSkippedRows"] += duplicates
+    stats["skippedRows"] += skipped
+    stats["missingRequiredRows"] += skipped
 
 
 def emit_phase_summary(ctx: MigrationContext, args, stats: Dict[str, int], notes: str = "") -> None:
     msg = (
         f"[PHASE SUMMARY][{ctx.config.BRAND_KEY} {stats['phase']}] "
         f"sourceRows={stats['sourceRows']} mappedRows={stats['mappedRows']} "
-        f"insertedRows={stats['insertedRows']} duplicateRows={stats['duplicateRows']} "
+        f"insertAttemptRows={stats['insertAttemptRows']} insertedRows={stats['insertedRows']} "
+        f"updatedRows={stats['updatedRows']} duplicateSkippedRows={stats['duplicateSkippedRows']} "
         f"skippedRows={stats['skippedRows']} missingPlayerRows={stats['missingPlayerRows']} "
         f"missingUsernameRows={stats['missingUsernameRows']} missingRequiredRows={stats['missingRequiredRows']} "
         f"mappingErrorRows={stats['mappingErrorRows']} insertErrorRows={stats['insertErrorRows']} "
-        f"batches={stats['batches']}"
+        f"dataBatches={stats['dataBatches']}"
     )
     trace(msg)
     write_summary_report(
@@ -69,14 +76,17 @@ def emit_phase_summary(ctx: MigrationContext, args, stats: Dict[str, int], notes
         phase=stats["phase"],
         sourceRows=stats["sourceRows"],
         mappedRows=stats["mappedRows"],
+        insertAttemptRows=stats["insertAttemptRows"],
         insertedRows=stats["insertedRows"],
-        duplicateRows=stats["duplicateRows"],
+        updatedRows=stats["updatedRows"],
+        duplicateSkippedRows=stats["duplicateSkippedRows"],
         skippedRows=stats["skippedRows"],
         missingPlayerRows=stats["missingPlayerRows"],
         missingUsernameRows=stats["missingUsernameRows"],
         missingRequiredRows=stats["missingRequiredRows"],
         mappingErrorRows=stats["mappingErrorRows"],
         insertErrorRows=stats["insertErrorRows"],
+        dataBatches=stats["dataBatches"],
         dryRun=args.dry_run,
         dateFrom=ctx.from_dt,
         dateTo=ctx.until_dt,
@@ -150,7 +160,7 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
         rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES["players"], source_date_expr(adapter, "players"), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} players")
         if not rows:
             break
-        stats["batches"] += 1
+        stats["dataBatches"] += 1
         stats["sourceRows"] += len(rows)
         for row in rows:
             try:
@@ -163,10 +173,11 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
                     continue
                 stats["mappedRows"] += 1
                 _, status = upsert_player(tgt_conn, config, NormalizedPlayer.from_mapping(mapped), args.dry_run, return_status=True)
+                stats["insertAttemptRows"] += 1
                 if status in ("inserted", "insertable"):
                     stats["insertedRows"] += 1
                 else:
-                    stats["duplicateRows"] += 1
+                    stats["updatedRows"] += 1
             except Exception as exc:
                 stats["skippedRows"] += 1
                 stats["insertErrorRows"] += 1
@@ -192,7 +203,7 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
         rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES["game_transactions"], source_date_expr(adapter, "game_transactions"), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} game")
         if not rows:
             break
-        stats["batches"] += 1
+        stats["dataBatches"] += 1
         stats["sourceRows"] += len(rows)
         mapped_rows: List[Any] = []
         for row in rows:
@@ -244,7 +255,7 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
             rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES[source_key], source_date_expr(adapter, source_key), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} {kind}")
             if not rows:
                 break
-            stats["batches"] += 1
+            stats["dataBatches"] += 1
             stats["sourceRows"] += len(rows)
             mapped_rows = []
             for row in rows:
@@ -308,7 +319,7 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
         rows = adapter.fetch_player_rows(src_conn, int(after_id or 0), args.batch_size, ctx.from_dt, ctx.until_dt)
         if not rows:
             break
-        stats["batches"] += 1
+        stats["dataBatches"] += 1
         stats["sourceRows"] += len(rows)
         for row in rows:
             try:
@@ -321,10 +332,11 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
                     continue
                 stats["mappedRows"] += 1
                 _, status = upsert_player(tgt_conn, config, NormalizedPlayer.from_mapping(mapped), args.dry_run, return_status=True)
+                stats["insertAttemptRows"] += 1
                 if status in ("inserted", "insertable"):
                     stats["insertedRows"] += 1
                 else:
-                    stats["duplicateRows"] += 1
+                    stats["updatedRows"] += 1
             except Exception as exc:
                 stats["skippedRows"] += 1
                 stats["insertErrorRows"] += 1
@@ -350,7 +362,7 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
         rows = adapter.fetch_game_rows(src_conn, int(after_id or 0), args.batch_size, ctx.from_dt, ctx.until_dt)
         if not rows:
             break
-        stats["batches"] += 1
+        stats["dataBatches"] += 1
         stats["sourceRows"] += len(rows)
         mapped_rows = []
         for row in rows:
@@ -401,7 +413,7 @@ def process_flat_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, ar
         rows = adapter.fetch_wallet_rows(src_conn, int(after_id or 0), args.batch_size, ctx.from_dt, ctx.until_dt)
         if not rows:
             break
-        stats["batches"] += 1
+        stats["dataBatches"] += 1
         stats["sourceRows"] += len(rows)
         mapped_rows = []
         for row in rows:
@@ -463,7 +475,7 @@ def process_member_driven_brand(src_conn, tgt_conn, ctx: MigrationContext, args)
         rows = fetch_json_batch(src_conn, config.SOURCE_SCHEMA, config.SOURCE_TABLES["players"], source_date_expr(adapter, "players"), after_dt, after_id, args.batch_size, from_dt, until_dt, label=f"{config.BRAND_KEY} member batch")
         if not rows:
             break
-        player_stats["batches"] += 1
+        player_stats["dataBatches"] += 1
         player_stats["sourceRows"] += len(rows)
         for row in rows:
             try:
@@ -475,10 +487,11 @@ def process_member_driven_brand(src_conn, tgt_conn, ctx: MigrationContext, args)
                 player_model = NormalizedPlayer.from_mapping(player)
                 player_id, status = upsert_player(tgt_conn, config, player_model, args.dry_run, return_status=True)
                 player_stats["mappedRows"] += 1
+                player_stats["insertAttemptRows"] += 1
                 if status in ("inserted", "insertable"):
                     player_stats["insertedRows"] += 1
                 else:
-                    player_stats["duplicateRows"] += 1
+                    player_stats["updatedRows"] += 1
                 player_map[username_key(player_model.username)] = player_id
                 member_id = player_model.external_id
                 username = player_model.username
