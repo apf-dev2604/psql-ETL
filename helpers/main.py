@@ -8,7 +8,7 @@ from .models import BrandConfig, NormalizedGameTransaction, NormalizedPlayer, No
 from .validators import validate_adapter, validate_brand_config
 from .db import connect
 from .players import build_player_map, lookup_player_id_by_username, upsert_player, username_key
-from .reports import configure_logging, make_report_paths, trace, initialize_report_files, write_summary_report
+from .reports import configure_logging, make_report_paths, trace, initialize_report_files, write_summary_report, write_phase_report, emit_final_error_summary
 from .source_fetch import fetch_json_batch, format_checkpoint, get_checkpoint, parse_checkpoint, set_checkpoint
 from .game_transactions import insert_game_transactions
 from .wallet_transactions import ensure_wallet_dedupe_index, insert_wallet_transactions
@@ -249,11 +249,13 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
                 if not mapped:
                     stats["skippedRows"] += 1
                     stats["mappingErrorRows"] += 1
+                    write_phase_report(paths.game, issueType="game_mapping_error", sourceTable=config.SOURCE_TABLES.get("game_transactions"), sourceId=row.get("id"), action="skipped", reason="Adapter returned no mapped game transaction")
                     continue
                 username = mapped.get("username") or ""
                 if not username:
                     stats["skippedRows"] += 1
                     stats["missingUsernameRows"] += 1
+                    write_phase_report(paths.game, issueType="missing_username", sourceTable=config.SOURCE_TABLES.get("game_transactions"), sourceId=row.get("id"), referenceId=mapped.get("external_id"), action="skipped", reason="Missing username/member.name in source game transaction")
                     continue
                 player_id = resolve_player_id(tgt_conn, config, player_map, username)
                 if player_id:
@@ -263,9 +265,11 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
                 else:
                     stats["skippedRows"] += 1
                     stats["missingPlayerRows"] += 1
+                    write_phase_report(paths.game, issueType="player_not_in_player_map", sourceTable=config.SOURCE_TABLES.get("game_transactions"), sourceUsername=username, sourceId=row.get("id"), referenceId=mapped.get("external_id"), action="skipped", reason="Unable to process no playerRecord; username not found in player_map/playerDetails_final. No shadow/ghost player was created.")
             except Exception as exc:
                 stats["skippedRows"] += 1
                 stats["mappingErrorRows"] += 1
+                write_phase_report(paths.game, issueType="game_mapping_exception", sourceTable=config.SOURCE_TABLES.get("game_transactions"), sourceId=row.get("id"), action="skipped", reason="Game transaction mapping exception", error=exc)
                 trace(f"[GAME MAP ERROR][{config.BRAND_KEY}] sourceId={row.get('id')} error={exc}")
         try:
             add_insert_stats(stats, insert_game_transactions(tgt_conn, config, mapped_rows, args.dry_run, paths.game))
@@ -301,11 +305,13 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
                     if not mapped:
                         stats["skippedRows"] += 1
                         stats["mappingErrorRows"] += 1
+                        write_phase_report(report_path, issueType=f"{kind}_mapping_error", sourceTable=config.SOURCE_TABLES.get(source_key), sourceId=row.get("id"), action="skipped", reason="Adapter returned no mapped wallet transaction")
                         continue
                     username = mapped.get("username") or ""
                     if not username:
                         stats["skippedRows"] += 1
                         stats["missingUsernameRows"] += 1
+                        write_phase_report(report_path, issueType="missing_username", sourceTable=config.SOURCE_TABLES.get(source_key), sourceId=row.get("id"), referenceId=mapped.get("reference_id"), action="skipped", reason=f"Missing username/member.name in source {kind} transaction")
                         continue
                     player_id = resolve_player_id(tgt_conn, config, player_map, username)
                     if player_id:
@@ -315,9 +321,11 @@ def process_table_batch_brand(src_conn, tgt_conn, ctx: MigrationContext, args) -
                     else:
                         stats["skippedRows"] += 1
                         stats["missingPlayerRows"] += 1
+                        write_phase_report(report_path, issueType="player_not_in_player_map", sourceTable=config.SOURCE_TABLES.get(source_key), sourceUsername=username, sourceId=row.get("id"), referenceId=mapped.get("reference_id"), action="skipped", reason="Unable to process no playerRecord; username not found in player_map/playerDetails_final. No shadow/ghost player was created.")
                 except Exception as exc:
                     stats["skippedRows"] += 1
                     stats["mappingErrorRows"] += 1
+                    write_phase_report(report_path, issueType=f"{kind}_mapping_exception", sourceTable=config.SOURCE_TABLES.get(source_key), sourceId=row.get("id"), action="skipped", reason="Wallet transaction mapping exception", error=exc)
                     trace(f"[WALLET MAP ERROR][{config.BRAND_KEY} {kind}] sourceId={row.get('id')} error={exc}")
             try:
                 add_insert_stats(stats, insert_wallet_transactions(tgt_conn, config, mapped_rows, args.dry_run, report_path))
@@ -637,6 +645,7 @@ def main() -> None:
             tgt.rollback()
         else:
             tgt.commit()
+        emit_final_error_summary(config.BRAND, paths)
         trace("\n".join([
             f"[RUN SUMMARY][{config.BRAND}]",
             f"  sourceProcessed : {total}",
@@ -645,6 +654,7 @@ def main() -> None:
             f"  dqOnly          : {args.dq_only}",
             "  reports:",
             f"    summary        : {paths.summary}",
+            f"    error_summary  : {paths.error_summary}",
             f"    players        : {paths.players}",
             f"    game           : {paths.game}",
             f"    deposits       : {paths.deposits}",
