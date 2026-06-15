@@ -43,32 +43,68 @@ def new_stats(phase: str) -> Dict[str, int]:
 
 
 def add_insert_stats(stats: Dict[str, int], result) -> None:
-    """Accept insert helper result as (inserted, duplicates, skipped)."""
+    """Accept insert helper result as either:
+    - (inserted, duplicates, skipped)
+    - (inserted, duplicates, skipped, insert_errors)
+    """
     try:
-        inserted, duplicates, skipped = result
+        if len(result) >= 4:
+            inserted, duplicates, skipped, insert_errors = result[:4]
+        else:
+            inserted, duplicates, skipped = result
+            insert_errors = 0
     except Exception:
-        inserted, duplicates, skipped = (0, 0, 0)
+        inserted, duplicates, skipped, insert_errors = (0, 0, 0, 0)
     inserted = int(inserted or 0)
     duplicates = int(duplicates or 0)
     skipped = int(skipped or 0)
-    stats["insertAttemptRows"] += inserted + duplicates
+    insert_errors = int(insert_errors or 0)
+    stats["insertAttemptRows"] += inserted + duplicates + insert_errors
     stats["insertedRows"] += inserted
     stats["duplicateSkippedRows"] += duplicates
     stats["skippedRows"] += skipped
     stats["missingRequiredRows"] += skipped
+    stats["insertErrorRows"] += insert_errors
 
+
+
+
+def total_error_rows(stats: Dict[str, int]) -> int:
+    """Return a compact summary count of rows that had an error/issue.
+
+    This is intentionally an aggregate for screen/summary CSV only. Row-level
+    details remain in the phase CSVs. The count includes categorized pre-insert
+    skips plus target insert errors, while preventing generic skippedRows from
+    hiding uncategorized skips.
+    """
+    categorized_pre_insert = (
+        int(stats.get("missingPlayerRows") or 0)
+        + int(stats.get("missingUsernameRows") or 0)
+        + int(stats.get("missingRequiredRows") or 0)
+        + int(stats.get("mappingErrorRows") or 0)
+    )
+    uncategorized_skipped = max(0, int(stats.get("skippedRows") or 0) - categorized_pre_insert)
+    return categorized_pre_insert + uncategorized_skipped + int(stats.get("insertErrorRows") or 0)
 
 def emit_phase_summary(ctx: MigrationContext, args, stats: Dict[str, int], notes: str = "") -> None:
-    msg = (
-        f"[PHASE SUMMARY][{ctx.config.BRAND_KEY} {stats['phase']}] "
-        f"sourceRows={stats['sourceRows']} mappedRows={stats['mappedRows']} "
-        f"insertAttemptRows={stats['insertAttemptRows']} insertedRows={stats['insertedRows']} "
-        f"updatedRows={stats['updatedRows']} duplicateSkippedRows={stats['duplicateSkippedRows']} "
-        f"skippedRows={stats['skippedRows']} missingPlayerRows={stats['missingPlayerRows']} "
-        f"missingUsernameRows={stats['missingUsernameRows']} missingRequiredRows={stats['missingRequiredRows']} "
-        f"mappingErrorRows={stats['mappingErrorRows']} insertErrorRows={stats['insertErrorRows']} "
-        f"dataBatches={stats['dataBatches']}"
-    )
+    total_errors = total_error_rows(stats)
+    msg = "\n".join([
+        f"[PHASE SUMMARY][{ctx.config.BRAND_KEY} {stats['phase']}]",
+        f"  sourceRows            : {stats['sourceRows']}",
+        f"  mappedRows            : {stats['mappedRows']}",
+        f"  insertAttemptRows     : {stats['insertAttemptRows']}",
+        f"  insertedRows          : {stats['insertedRows']}",
+        f"  updatedRows           : {stats['updatedRows']}",
+        f"  duplicateSkippedRows  : {stats['duplicateSkippedRows']}",
+        f"  skippedRows           : {stats['skippedRows']}",
+        f"  missingPlayerRows     : {stats['missingPlayerRows']}",
+        f"  missingUsernameRows   : {stats['missingUsernameRows']}",
+        f"  missingRequiredRows   : {stats['missingRequiredRows']}",
+        f"  mappingErrorRows      : {stats['mappingErrorRows']}",
+        f"  insertErrorRows       : {stats['insertErrorRows']}",
+        f"  totalErrorRows        : {total_errors}",
+        f"  dataBatches           : {stats['dataBatches']}",
+    ])
     trace(msg)
     write_summary_report(
         ctx.paths.summary,
@@ -86,6 +122,7 @@ def emit_phase_summary(ctx: MigrationContext, args, stats: Dict[str, int], notes
         missingRequiredRows=stats["missingRequiredRows"],
         mappingErrorRows=stats["mappingErrorRows"],
         insertErrorRows=stats["insertErrorRows"],
+        totalErrorRows=total_errors,
         dataBatches=stats["dataBatches"],
         dryRun=args.dry_run,
         dateFrom=ctx.from_dt,
@@ -600,8 +637,21 @@ def main() -> None:
             tgt.rollback()
         else:
             tgt.commit()
-        trace(f"[RUN SUMMARY][{config.BRAND}] sourceProcessed={total} dryRun={args.dry_run} reconOnly={args.recon_only} dqOnly={args.dq_only}")
-        trace(f"reports: summary={paths.summary} players={paths.players} game={paths.game} deposits={paths.deposits} withdrawals={paths.withdrawals} reconciliation={paths.reconciliation}")
+        trace("\n".join([
+            f"[RUN SUMMARY][{config.BRAND}]",
+            f"  sourceProcessed : {total}",
+            f"  dryRun          : {args.dry_run}",
+            f"  reconOnly       : {args.recon_only}",
+            f"  dqOnly          : {args.dq_only}",
+            "  reports:",
+            f"    summary        : {paths.summary}",
+            f"    players        : {paths.players}",
+            f"    game           : {paths.game}",
+            f"    deposits       : {paths.deposits}",
+            f"    withdrawals    : {paths.withdrawals}",
+            f"    reconciliation : {paths.reconciliation}",
+            f"    data_quality   : {paths.data_quality}",
+        ]))
     finally:
         try:
             src.close()

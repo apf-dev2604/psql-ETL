@@ -84,6 +84,12 @@ PHASE_FIELDS = [
     "targetUsername",
     "action",
     "reason",
+    "sqlstate",
+    "constraintName",
+    "tableName",
+    "columnName",
+    "messageDetail",
+    "messageHint",
     "error",
 ]
 
@@ -111,7 +117,10 @@ RECON_FIELDS = [
 
 
 def write_phase_report(path: str, **kwargs: Any) -> None:
-    row = {name: short_text(kwargs.get(name), 300) for name in PHASE_FIELDS}
+    row = {}
+    for name in PHASE_FIELDS:
+        limit = 2000 if name in ("error", "reason") else 500
+        row[name] = short_text(kwargs.get(name), limit)
     write_csv_row(path, PHASE_FIELDS, row)
 
 
@@ -161,6 +170,7 @@ SUMMARY_FIELDS = [
     "missingRequiredRows",
     "mappingErrorRows",
     "insertErrorRows",
+    "totalErrorRows",
     "dataBatches",
     "dryRun",
     "dateFrom",
